@@ -5,12 +5,11 @@ from typing import List, Tuple
 import sentencepiece as spm
 import torch
 import numpy as np
-import fire
-from .fire_utils import only_allow_defined_args
 
 from .model import Model, HParams
 from .common import END_OF_LINE, END_OF_TEXT
 
+from torch.nn.functional import softmax
 
 class ModelWrapper:
     END_OF_LINE = END_OF_LINE
@@ -19,6 +18,10 @@ class ModelWrapper:
     def __init__(self, model: Model, sp_model: spm.SentencePieceProcessor):
         self.model = model
         self.sp_model = sp_model
+
+    def to(self, device):
+        self.device = device
+        self.model.to(device)
 
     @classmethod
     def load(cls, root: Path):
@@ -40,7 +43,7 @@ class ModelWrapper:
         return cls(model, sp_model)
 
     def tokenize(self, s: str) -> List[str]:
-        return self.sp_model.EncodeAsPieces(s)
+        return [self.token_to_id(x) for x in self.sp_model.EncodeAsPieces(s)]
 
     def token_to_id(self, token: str) -> int:
         return self.sp_model.PieceToId(token)
@@ -83,26 +86,37 @@ class ModelWrapper:
                        for i in next_log_probs.argsort()[-top_k:]],
                       reverse=True)
 
-    def generate_tokens(self, tokens_prefix: List[str], tokens_to_generate: int, top_k: int) -> List[str]:
 
-        tokens = list(tokens_prefix)
+    """
+    Batch generation for sequences with same length
+
+    param tokens_prefix: input sequences, size (batch_size, seq_length)
+
+    """
+    def generate_tokens(self, tokens_prefix: torch.LongTensor, tokens_to_generate: int, top_k: int, temperature:float = 0.1) -> List[str]:
+
+        input_length = tokens_prefix.size(1)
+
+        tokens = torch.zeros((tokens_prefix.size(0), input_length + tokens_to_generate), dtype=torch.long, device=self.device)
+        tokens[:,:tokens_prefix.size(1)] = tokens_prefix
 
         for i in range(tokens_to_generate):
+            pred = self.model(tokens[:,:input_length+i])['logits'][:,-1,:]
+            probs_batch = softmax(pred / temperature, -1)
+            for batch_idx, probs in enumerate(probs_batch):
+                pred = torch.multinomial(probs,1)
+                tokens[batch_idx,input_length+i] = pred
 
-            # generate TOP_K potential next tokens
-            ntk = self.get_next_top_k(tokens, top_k)
+        return tokens
 
-            # convert log probs to real probs
-            logprobs = np.array(list(map(lambda a: a[0], ntk)))
-            probs = np.exp(logprobs) / np.exp(logprobs).sum()
+    def detokenize(self, tokens):
+        return self.sp_model.DecodePieces([self.id_to_token(token) for token in tokens])
 
-            # pick next token randomly according to probs distribution
-            next_token_n = np.random.choice(top_k, p=probs)
-            next_token = ntk[next_token_n][1]
-            # print (next_token)
-            
-            tokens.append(next_token)
-
+    def tokenize_batch(self, batch):
+        batch = [self.sp_model.EncodeAsPieces(prefix) for prefix in batch]
+        max_len = max(len(x) for x in batch)
+        batch = [[END_OF_LINE] * (max_len - len(prefix)) + prefix for prefix in batch]
+        tokens = [[self.token_to_id(x) for x in prefix] for prefix in batch]
         return tokens
 
 
@@ -112,16 +126,18 @@ def fixed_state_dict(state_dict):
         state_dict = {k[len('module.'):]: v for k, v in state_dict.items()}
     return state_dict
 
-def gen_main(model_path, prefix, tokens_to_generate=42, top_k=8):
+def gen_main(model_path, prefixes, tokens_to_generate=5, top_k=8):
+
+    device = torch.device("cpu")
 
     print("loading model from %s" % model_path)
     mw = ModelWrapper.load(Path(model_path))
+    mw.to(device)
 
-    print("generating text for prefix %s" % prefix)
-    tokens = mw.tokenize(prefix)
+    print("generating text for prefix %s" % prefixes)
+    tokens = mw.tokenize_batch(prefixes)
+    tokens = torch.tensor(tokens, dtype=torch.long, device=mw.device)
 
     tokens_gen = mw.generate_tokens(tokens, tokens_to_generate, top_k)
-    print(mw.sp_model.DecodePieces(tokens_gen))
-
-def fire_gen_main():
-    fire.Fire(only_allow_defined_args(gen_main))
+    for tokens in tokens_gen:
+        print(mw.detokenize(tokens))
