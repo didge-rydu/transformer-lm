@@ -115,6 +115,7 @@ class ModelWrapper:
     def tokenize_batch(self, batch):
         batch = [self.sp_model.EncodeAsPieces(prefix) for prefix in batch]
         max_len = max(len(x) for x in batch)
+        max_len = max(1, max_len) # Inputs need at least length 1
         batch = [[END_OF_LINE] * (max_len - len(prefix)) + prefix for prefix in batch]
         tokens = [[self.token_to_id(x) for x in prefix] for prefix in batch]
         return tokens
