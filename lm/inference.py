@@ -87,6 +87,25 @@ class ModelWrapper:
                       reverse=True)
 
 
+    
+    def generate_hidden(self, tokens_prefix: torch.LongTensor, tokens_to_generate: int, top_k: int, temperature:float = 0.1) -> List[str]:
+
+        input_length = tokens_prefix.size(1)
+
+        tokens = torch.zeros((tokens_prefix.size(0), input_length + tokens_to_generate), dtype=torch.long, device=self.device)
+        tokens[:,:tokens_prefix.size(1)] = tokens_prefix
+
+        for i in range(tokens_to_generate):
+            pred = self.model(tokens[:,:input_length+i])
+            logits = pred['logits'][:,-1,:]
+            print(pred['presents'])
+            probs_batch = softmax(pred / temperature, -1)
+            for batch_idx, probs in enumerate(probs_batch):
+                pred = torch.multinomial(probs,1)
+                tokens[batch_idx,input_length+i] = logits
+
+        return tokens
+
     """
     Batch generation for sequences with same length
 
